@@ -16,13 +16,13 @@ Material:
 
 ## Photos
 
-![](https://github.com/teemow/ble-midi-footswitch/blob/main/docs/photos/raw_case.png?raw=true)
-![](https://github.com/teemow/ble-midi-footswitch/blob/main/docs/photos/raw_case_with_holes.png?raw=true)
-![](https://github.com/teemow/ble-midi-footswitch/blob/main/docs/photos/raw_case_with_holes_back.png?raw=true)
+![](https://github.com/teemow/ble-midi-footswitch/blob/main/docs/photos/raw_case.jpg?raw=true)
+![](https://github.com/teemow/ble-midi-footswitch/blob/main/docs/photos/raw_case_with_holes.jpg?raw=true)
+![](https://github.com/teemow/ble-midi-footswitch/blob/main/docs/photos/raw_case_with_holes_back.jpg?raw=true)
 ![](https://github.com/teemow/ble-midi-footswitch/blob/main/docs/photos/testing_ble_with_a_switch.mp4?raw=true)
-![](https://github.com/teemow/ble-midi-footswitch/blob/main/docs/photos/painted_case.png?raw=true)
-![](https://github.com/teemow/ble-midi-footswitch/blob/main/docs/photos/fully_assembled.png?raw=true)
-![](https://github.com/teemow/ble-midi-footswitch/blob/main/docs/photos/fully_assembled_back.png?raw=true)
+![](https://github.com/teemow/ble-midi-footswitch/blob/main/docs/photos/painted_case.jpg?raw=true)
+![](https://github.com/teemow/ble-midi-footswitch/blob/main/docs/photos/fully_assembled.jpg?raw=true)
+![](https://github.com/teemow/ble-midi-footswitch/blob/main/docs/photos/fully_assembled_back.jpg?raw=true)
 ![](https://github.com/teemow/ble-midi-footswitch/blob/main/docs/photos/testing_leds.mp4?raw=true)
 ![](https://github.com/teemow/ble-midi-footswitch/blob/main/docs/photos/testing_the_matrix.mp4?raw=true)
 
