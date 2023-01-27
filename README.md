@@ -25,5 +25,4 @@ Material:
 ![](https://github.com/teemow/ble-midi-footswitch/blob/main/docs/photos/fully_assembled_back.png?raw=true)
 ![](https://github.com/teemow/ble-midi-footswitch/blob/main/docs/photos/testing_leds.mp4?raw=true)
 ![](https://github.com/teemow/ble-midi-footswitch/blob/main/docs/photos/testing_the_matrix.mp4?raw=true)
-![](https://github.com/teemow/ble-midi-footswitch/blob/main/docs/photos/first_full_test.mp4?raw=true)
 
