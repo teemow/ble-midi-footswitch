@@ -58,18 +58,63 @@ the pedals + plugins), and talks to the **X32 directly over WiFi/OSC**.
   firewall can scope an allow rule). The matching nftables rule lives in
   `demiurg/system/etc/nftables.conf` (TCP/3233 from `@trusted_v4`).
 
-**Carry-over note:** flash is ~89% full on the default partition. Before Phase 1
-grows the image, switch to a dual-OTA-friendly scheme with more app space, e.g.
-`board_build.partitions = min_spiffs.csv` (≈1.9 MB per OTA slot).
+### Phase 1 — Scene model + on-device store (IN PROGRESS)
 
-### Phase 1 — Scene model + on-device store
+**Done (build- and hardware-verified):**
 
-- Define the **scene data model** (JSON): per scene, an ordered list of targets
-  and messages (CC / program-change / SysEx) + OSC commands for the X32.
-- **On-device store** on flash (LittleFS or NVS); survive power-cycle.
-- **Replay engine** mirroring the mcp server's recall semantics: program-change
-  **before** CC, per-device settle delay, additive vs exact.
-- **Footswitch UX**: map banks/switches to songs/scenes; matrix + LED feedback.
+- **Partition scheme switched** to `board_build.partitions = min_spiffs.csv` +
+  `board_build.filesystem = littlefs`. The app slot grew from ~1.3 MB to ~1.9 MB,
+  so the (now larger) image sits at ~62% instead of ~89%, and a ~190 KB
+  LittleFS data partition holds the scene store. Dual-OTA preserved.
+- **Compiled-scene model + JSON parser** (`include/scene.h`, `src/scene.cpp`),
+  parsed with **ArduinoJson 7**. A scene = an **inbound trigger** + an
+  **already-ordered list of outgoing wire events**. The footswitch is a faithful
+  *player*: the mcp server resolves recall semantics (PC-before-CC, additive vs
+  exact) at **compile time** and bakes them into the event order; per-device
+  **settle** is expressed as a per-event `delay_ms` honoured after each send.
+- **On-device store** on **LittleFS** (`/scenes/*.json`), loaded into RAM at
+  boot. Schema + example in `data/scenes/` (flash with `pio run -t uploadfs`).
+- **Replay engine** (`replayScene`) emits the ordered events over BLE-MIDI
+  (`cc` / `program_change` / `note_on` / `note_off` / `sysex`).
+- **UX / triggering** (refined with the user — see below):
+  - **Inbound MIDI from AUM selects + replays a scene** (the live in-song path):
+    AUM sends a single message (Program Change is the natural "single signal";
+    CC and Note also supported), `three` matches it against scene triggers and
+    expands it into the scene's outgoing MIDI. No button press needed in-song.
+  - **Banks are now scenes:** SW0/SW1 step the scene cursor and replay (manual
+    foot fallback). Matrix shows the scene's display digit (`-` when empty).
+  - **SW2–SW5 keep fixed transport CCs to AUM** (decoupled from scene select):
+    `transport_cc[] = {-, -, 60, 61, 62, 63}`, ch 1, val 127 — SW3 stop/rewind,
+    SW4 record, SW5 play, SW2 free. **Verify/adjust these CC numbers against the
+    actual AUM mapping on hardware.**
+
+**Hardware-verified (2026-06-02):** flashed over USB (`-t upload` + `-t uploadfs`).
+Serial boot log shows `scene: loaded 1 scene(s)`, WiFi + OTA up. Bonded as a BLE
+central, sent **Program Change ch 1 #0**, and `aseqdump`'d `ThreeFoot`: it emitted
+exactly the example scene's events in order — `PC ch2 #12`, `CC ch2 #28=127`,
+`CC ch3 #17=64` (aseqdump prints 0-based wire channels; values/ordering exact).
+The inbound-trigger → store lookup → replay path works end to end.
+
+**Physical-switch checks (2026-06-02, feet on the box):** with the device bonded
+to a laptop and `aseqdump`'d, every switch was pressed and captured:
+- **SW0 / SW1** (scene nav) both select + replay the scene — emitted the example
+  scene's `PC ch2 #12`, `CC ch2 #28=127`, `CC ch3 #17=64` in order. With a single
+  scene loaded they clamp to it and re-replay (matrix stays on its digit), as
+  designed.
+- **SW2–SW5** sent fixed transport CCs **60 / 61 / 62 / 63** (ch 1, val 127),
+  matching `transport_cc[]`.
+- SW0/SW1 now share the same post-replay LED hold (250 ms) so the foot-nav LED is
+  visible. (Note: on *this* unit the SW0 upper-red LED is a dead LED / bad joint —
+  switch + MIDI verified working; cosmetic LED repair tracked in the private rig
+  notes, not a firmware issue.)
+
+**Remaining for Phase 1 (next):**
+
+- **Confirm the transport CC numbers (60–63) match the live AUM mapping** — needs
+  the iPad/AUM (only the *sending* of those CCs is verified so far).
+- Tune the inbound-handler behaviour while a scene is mid-replay (currently the
+  replay blocks the MIDI-read task; fine for short scenes).
+- Decide scene-cursor display for >9 scenes (single matrix digit today).
 
 ### Phase 2 — Provisioning protocol (mcp server → footswitch)
 
@@ -109,6 +154,9 @@ pio device monitor -e lolin32
 
 # OTA flash (device on WiFi, reachable as three.local)
 pio run -e ota -t upload
+
+# Upload the scene store (data/scenes/*.json) to the device's LittleFS partition
+pio run -e lolin32 -t uploadfs
 
 # First-time / re-provision WiFi: hold SW0 (bank-up) while powering on,
 # then join AP "THREE" (pass THR33!!!) and pick your network.

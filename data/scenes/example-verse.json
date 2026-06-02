@@ -1,0 +1,11 @@
+{
+  "id": "example-verse",
+  "name": "Example Verse",
+  "bank": 1,
+  "trigger": { "type": "program_change", "channel": 1, "number": 0 },
+  "events": [
+    { "type": "program_change", "channel": 2, "program": 12, "delay_ms": 80 },
+    { "type": "cc", "channel": 2, "controller": 28, "value": 127 },
+    { "type": "cc", "channel": 3, "controller": 17, "value": 64 }
+  ]
+}

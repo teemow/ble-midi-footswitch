@@ -13,6 +13,9 @@
 #include <BLEMIDI_Transport.h>
 #include <hardware/BLEMIDI_ESP32_NimBLE.h>
 
+// Phase 1: on-device compiled-scene store + replay (see include/scene.h).
+#include "scene.h"
+
 // LED pins (red, red, green, green, blue, blue)
 const int led_pins[6] = {26, 25, 14, 27, 13, 12};
 
@@ -63,7 +66,17 @@ int btn_last_states[6] = {HIGH, HIGH, HIGH, HIGH, HIGH, HIGH};
 unsigned long btn_last_debounce_times[6] = {0, 0, 0, 0, 0, 0};
 unsigned long debounceDelay = 30;
 
-int bank = 1;
+// Scene store + the currently selected scene (index into the store). The old
+// "bank" concept is now a scene cursor: SW0/SW1 step it and replay; inbound MIDI
+// from AUM selects + replays a scene by its trigger.
+scenes::Store sceneStore;
+int currentScene = 0;
+
+// Fixed transport CCs for the action switches (SW2..SW5), sent to AUM on ch 1
+// val 127. These are decoupled from scene selection (SW3 stop/rewind, SW4
+// record, SW5 play; SW2 free). Adjust to match the AUM MIDI mapping. Indices
+// 0/1 are unused (those switches are scene nav).
+const int transport_cc[6] = {-1, -1, 60, 61, 62, 63};
 
 // 8x8 led matrix. The data/clock pins (D7=GPIO23, D5=GPIO18) are provided as
 // build flags in platformio.ini so the WEMOS_Matrix_GFX library compiles too.
@@ -115,7 +128,10 @@ static const uint8_t PROGMEM
 
 // Forward declarations
 void clearMatrix();
-void drawBank();
+void drawScene();
+void replayScene(const scenes::Scene &sc);
+void replaySelected();
+void selectScene(int index, bool replay);
 void drawSmile();
 void drawWink();
 void drawFrown();
@@ -162,7 +178,7 @@ void setup() {
     vTaskDelay(50/portTICK_PERIOD_MS);
     blinkLEDBlue(50);
     vTaskDelay(850/portTICK_PERIOD_MS);
-    drawBank();
+    drawScene();
   });
 
   BLEMIDI.setHandleDisconnected([]() {
@@ -174,28 +190,40 @@ void setup() {
     vTaskDelay(50/portTICK_PERIOD_MS);
     blinkLEDRed(50);
     vTaskDelay(850/portTICK_PERIOD_MS);
-    drawBank();
+    drawScene();
+  });
+
+  // Inbound MIDI from AUM selects + replays a scene (the live in-song path:
+  // AUM sends one message, "three" expands it into the scene's outgoing MIDI).
+  MIDI.setHandleProgramChange([](byte channel, byte program) {
+    int i = sceneStore.matchProgramChange(channel, program);
+    if (i >= 0) selectScene(i, true);
+  });
+
+  MIDI.setHandleControlChange([](byte channel, byte cc, byte value) {
+    int i = sceneStore.matchControlChange(channel, cc, value);
+    if (i >= 0) selectScene(i, true);
   });
 
   MIDI.setHandleNoteOn([](byte channel, byte note, byte velocity) {
-    Serial.print("NoteON: CH: ");
-    Serial.print(channel);
-    Serial.print(" | ");
-    Serial.print(note);
-    Serial.print(", ");
-    Serial.println(velocity);
     digitalWrite(LED_BUILTIN, LOW);
+    int i = sceneStore.matchNoteOn(channel, note);
+    if (i >= 0) selectScene(i, true);
   });
-  
+
   MIDI.setHandleNoteOff([](byte channel, byte note, byte velocity) {
     digitalWrite(LED_BUILTIN, HIGH);
   });
 
+  // Mount the scene store (LittleFS /scenes). Best-effort: a missing/empty store
+  // just means no scenes to replay yet (the mcp server pushes them in Phase 2).
+  sceneStore.begin();
+
   //See FreeRTOS for more multitask info
   xTaskCreatePinnedToCore(
-    readCB,  
+    readCB,
     "MIDI-READ",
-    3000,
+    4096,   // headroom: inbound handlers now drive scene replay from this task
     NULL,
     1,
     NULL,
@@ -221,7 +249,7 @@ void setup() {
   // connect and we fall through to BLE-only if it fails.
   maybeSetupWiFi(portalRequested);
 
-  drawBank();
+  drawScene();
 }
 
 void loop() {
@@ -231,33 +259,26 @@ void loop() {
     ArduinoOTA.handle();
   }
 
-  // upper red is bank up
+  // upper red: next scene (foot fallback for selecting + replaying a scene).
   if (buttonPressed(0)) {
-    bank++;
-    if (bank > 9) {
-      bank = 9;
-    }
     digitalWrite(led_pins[0], HIGH);
-    drawBank();
+    selectScene(currentScene + 1, true);
+    vTaskDelay(250/portTICK_PERIOD_MS);
     digitalWrite(led_pins[0], LOW);
   }
 
-  // lower red is bank down
+  // lower red: previous scene.
   if (buttonPressed(1)) {
-    bank--;
-    if (bank < 1) {
-      bank = 1;
-    }
     digitalWrite(led_pins[1], HIGH);
-    drawBank();
+    selectScene(currentScene - 1, true);
     vTaskDelay(250/portTICK_PERIOD_MS);
     digitalWrite(led_pins[1], LOW);
   }
 
-  // all others send midi cc
+  // action switches: fixed transport CCs to AUM (decoupled from scene select).
   for (int i = 2; i < 6; i++) {
     if (buttonPressed(i)) {
-      sendControlChange(58 + i + (bank - 1) * 4, led_pins[i]);
+      sendControlChange(transport_cc[i], led_pins[i]);
     }
   }
 }
@@ -351,6 +372,7 @@ void readCB(void *parameter) {
 }
 
 void sendControlChange(int note, byte led) {
+  if (note < 0) return;  // unmapped switch
   if (isConnected) {
     MIDI.sendControlChange(note, 127, 1);
     digitalWrite(led, HIGH);
@@ -364,8 +386,72 @@ void sendControlChange(int note, byte led) {
     blinkAllLEDs(10);
 
     vTaskDelay(500/portTICK_PERIOD_MS);
-    drawBank();
+    drawScene();
   }
+}
+
+// --- Scene replay -----------------------------------------------------------
+
+// Emit a compiled scene's ordered events over BLE-MIDI. The mcp server has
+// already resolved ordering (PC before CC) and settle windows into per-event
+// delays, so this is a faithful, dumb player.
+void replayScene(const scenes::Scene &sc) {
+  for (const scenes::Event &ev : sc.events) {
+    switch (ev.type) {
+      case scenes::EventType::CC:
+        MIDI.sendControlChange(ev.data1, ev.data2, ev.channel);
+        break;
+      case scenes::EventType::ProgramChange:
+        MIDI.sendProgramChange(ev.data1, ev.channel);
+        break;
+      case scenes::EventType::NoteOn:
+        MIDI.sendNoteOn(ev.data1, ev.data2, ev.channel);
+        break;
+      case scenes::EventType::NoteOff:
+        MIDI.sendNoteOff(ev.data1, ev.data2, ev.channel);
+        break;
+      case scenes::EventType::SysEx:
+        if (!ev.sysex.empty()) {
+          // bytes include the F0..F7 boundaries -> ArrayContainsBoundaries=true
+          MIDI.sendSysEx(ev.sysex.size(), ev.sysex.data(), true);
+        }
+        break;
+    }
+    if (ev.delayMs > 0) {
+      vTaskDelay(ev.delayMs / portTICK_PERIOD_MS);
+    }
+  }
+}
+
+void replaySelected() {
+  const scenes::Scene *sc = sceneStore.at(currentScene);
+  if (sc == nullptr) return;
+  if (!isConnected) {
+    // can't reach AUM; flash a frown like a failed transport press
+    drawFrown();
+    blinkAllLEDs(10);
+    vTaskDelay(500/portTICK_PERIOD_MS);
+    drawScene();
+    return;
+  }
+  Serial.print("scene: replay ");
+  Serial.println(sc->name);
+  replayScene(*sc);
+}
+
+// Move the cursor to a scene (clamped) and optionally replay it. Triggered both
+// by the foot (SW0/SW1) and by inbound MIDI from AUM.
+void selectScene(int index, bool replay) {
+  size_t n = sceneStore.count();
+  if (n == 0) {
+    drawScene();
+    return;
+  }
+  if (index < 0) index = 0;
+  if (index >= (int)n) index = (int)n - 1;
+  currentScene = index;
+  drawScene();
+  if (replay) replaySelected();
 }
 
 bool buttonPressed(int i) {
@@ -451,9 +537,16 @@ void clearMatrix() {
   matrix.writeDisplay();
 }
 
-void drawBank() {
+// Show the current scene's display digit (1..9). A dash means the store is
+// empty (no scenes pushed yet).
+void drawScene() {
   matrix.clear();
-  matrix.drawChar(1, 1, bank + 48, 1, 0, 1);
+  if (sceneStore.empty()) {
+    matrix.drawChar(1, 1, '-', 1, 0, 1);
+  } else {
+    uint8_t d = sceneStore.displayDigit(currentScene);
+    matrix.drawChar(1, 1, d + 48, 1, 0, 1);
+  }
   matrix.writeDisplay();
 }
 
