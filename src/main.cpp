@@ -1,13 +1,13 @@
 #include <Arduino.h>
 
-/*
+// WiFi + OTA (Phase 0). WiFi is best-effort and must never block the live
+// BLE-MIDI path: we try saved credentials with a short timeout, and only open
+// the captive portal when SW0 (bank-up) is held at boot. OTA + mDNS come up
+// only when WiFi connected.
 #include <WiFi.h>
-#include <WebServer.h>
-#include <AutoConnect.h>
-
-WebServer Server;
-AutoConnect Portal(Server);
-*/
+#include <ESPmDNS.h>
+#include <ArduinoOTA.h>
+#include <WiFiManager.h>
 
 // bluetooth midi
 #include <BLEMIDI_Transport.h>
@@ -16,7 +16,9 @@ AutoConnect Portal(Server);
 // LED pins (red, red, green, green, blue, blue)
 const int led_pins[6] = {26, 25, 14, 27, 13, 12};
 
-// Button pins
+// Button pins. NOTE: btn_pins[2]=GPIO0, [3]=GPIO4, [4]=GPIO15, [5]=GPIO2 are
+// boot-strapping pins; GPIO0 especially must be HIGH at boot. Only btn_pins[0]
+// (GPIO16) is a safe pin to sample at boot, so it is the portal trigger below.
 const int btn_pins[6] = {16, 17, 0, 4, 15, 2};
 
 // Connect to first server found
@@ -25,6 +27,28 @@ BLEMIDI_CREATE_INSTANCE("ThreeFoot", MIDI);
 #ifndef LED_BUILTIN
 #define LED_BUILTIN 5 //modify for match with your board
 #endif
+
+// --- WiFi / OTA configuration ---------------------------------------------
+// Passwords are kept out of this public repo: copy include/secrets.h.example to
+// include/secrets.h (gitignored) and set them there. The fallback defaults
+// below keep the build working without it; change them before exposing the
+// device on a network you do not control.
+#if __has_include("secrets.h")
+#include "secrets.h"
+#endif
+#ifndef OTA_PASSWORD
+#define OTA_PASSWORD "changeme-ota"   // OTA upload auth (override in secrets.h)
+#endif
+#ifndef AP_PASSWORD
+#define AP_PASSWORD "changeme-ap"     // captive portal passphrase (override in secrets.h)
+#endif
+
+static const char *OTA_HOSTNAME = "three";      // -> three.local for espota
+static const char *AP_SSID = "THREE";            // captive portal SSID
+static const unsigned long WIFI_CONNECT_TIMEOUT_MS = 8000;
+
+bool wifiReady = false;
+bool otaInProgress = false;
 
 // Continuos Read function (See FreeRTOS multitasks)
 void readCB(void *parameter);
@@ -41,9 +65,8 @@ unsigned long debounceDelay = 30;
 
 int bank = 1;
 
-// 8x8 led matrix
-#define D5 18 // SCK - Clock for 8x8 matrix
-#define D7 23 // MOSI - Data for 8x8 matrix
+// 8x8 led matrix. The data/clock pins (D7=GPIO23, D5=GPIO18) are provided as
+// build flags in platformio.ini so the WEMOS_Matrix_GFX library compiles too.
 #define matrix_row 8
 #define matrix_col 8
 
@@ -90,6 +113,24 @@ static const uint8_t PROGMEM
     B01000010,
     B00000000 };
 
+// Forward declarations
+void clearMatrix();
+void drawBank();
+void drawSmile();
+void drawWink();
+void drawFrown();
+void drawHeart();
+void drawChar(char c);
+bool buttonPressed(int i);
+void sendControlChange(int note, byte led);
+void blinkLEDRed(int ms);
+void blinkLEDGreen(int ms);
+void blinkLEDBlue(int ms);
+void blinkAllLEDs(int ms);
+void setupOTA();
+void startConfigPortal();
+void maybeSetupWiFi(bool startPortal);
+
 void setup() {
   Serial.begin(115200);
 
@@ -104,6 +145,11 @@ void setup() {
   for (int i = 0; i < 6; i++) {
     pinMode(led_pins[i], OUTPUT);
   }
+
+  // Hold SW0 (bank-up, GPIO16) at boot to open the WiFi captive portal.
+  // Sampled before BLE/WiFi come up. Small settle delay for the pull-up.
+  delay(50);
+  bool portalRequested = (digitalRead(btn_pins[0]) == LOW);
 
   MIDI.begin(MIDI_CHANNEL_OMNI);
 
@@ -169,19 +215,21 @@ void setup() {
   delay(1000);
   drawHeart();
   delay(1000);
-  drawBank();
 
-  /*
-  Server.on("/", rootPage);
-  AutoConnectConfig config;
-  config.apid = +"THREE";
-  config.psk = "THR33!!!";
-  Portal.config(config);
-  Portal.begin();
-  */
+  // WiFi + OTA. If the portal was requested, that path blocks here (by design)
+  // until the user finishes provisioning; otherwise it is a short best-effort
+  // connect and we fall through to BLE-only if it fails.
+  maybeSetupWiFi(portalRequested);
+
+  drawBank();
 }
 
 void loop() {
+
+  // Service OTA when on WiFi (non-blocking until an update actually streams).
+  if (wifiReady) {
+    ArduinoOTA.handle();
+  }
 
   // upper red is bank up
   if (buttonPressed(0)) {
@@ -212,8 +260,79 @@ void loop() {
       sendControlChange(58 + i + (bank - 1) * 4, led_pins[i]);
     }
   }
-  
-  //Portal.handleClient();
+}
+
+// --- WiFi / OTA -------------------------------------------------------------
+
+void maybeSetupWiFi(bool startPortal) {
+  WiFi.mode(WIFI_STA);
+
+  if (startPortal) {
+    startConfigPortal();
+    return;
+  }
+
+  // Best-effort connect using credentials saved by a previous portal run.
+  drawChar('w');
+  WiFi.begin();
+  unsigned long start = millis();
+  while (WiFi.status() != WL_CONNECTED &&
+         (millis() - start) < WIFI_CONNECT_TIMEOUT_MS) {
+    delay(100);
+  }
+
+  if (WiFi.status() == WL_CONNECTED) {
+    wifiReady = true;
+    Serial.print("WiFi connected: ");
+    Serial.println(WiFi.localIP());
+    setupOTA();
+  } else {
+    Serial.println("WiFi not connected (BLE-only). Hold SW0 at boot to configure.");
+    WiFi.disconnect(true);   // free the radio for BLE if we are not using WiFi
+  }
+}
+
+void startConfigPortal() {
+  Serial.println("Starting WiFi config portal (AP THREE)...");
+  drawChar('P');
+
+  WiFiManager wm;
+  wm.setConfigPortalTimeout(180); // give up after 3 min, fall back to BLE-only
+  bool ok = wm.startConfigPortal(AP_SSID, AP_PASSWORD);
+
+  if (ok && WiFi.status() == WL_CONNECTED) {
+    wifiReady = true;
+    Serial.print("WiFi configured + connected: ");
+    Serial.println(WiFi.localIP());
+    setupOTA();
+  } else {
+    Serial.println("Config portal timed out; continuing BLE-only.");
+    WiFi.disconnect(true);
+  }
+}
+
+void setupOTA() {
+  ArduinoOTA.setHostname(OTA_HOSTNAME);   // registers mDNS three.local
+  ArduinoOTA.setPassword(OTA_PASSWORD);
+
+  ArduinoOTA.onStart([]() {
+    otaInProgress = true;
+    drawChar('U');
+  });
+  ArduinoOTA.onEnd([]() {
+    drawChar('D');
+  });
+  ArduinoOTA.onProgress([](unsigned int progress, unsigned int total) {
+    // Cheap heartbeat on the builtin LED during the flash.
+    digitalWrite(LED_BUILTIN, (progress / 8192) % 2);
+  });
+  ArduinoOTA.onError([](ota_error_t error) {
+    otaInProgress = false;
+    drawChar('E');
+  });
+
+  ArduinoOTA.begin();
+  Serial.println("OTA ready (hostname: three.local)");
 }
 
 /**
@@ -224,12 +343,9 @@ void loop() {
  * in case connection is lost.
 */
 void readCB(void *parameter) {
-  //  Serial.print("READ Task is started on core: ");
-  //  Serial.println(xPortGetCoreID());
   for (;;) {
     MIDI.read(); 
     vTaskDelay(1 / portTICK_PERIOD_MS); //Feed the watchdog of FreeRTOS.
-    //Serial.println(uxTaskGetStackHighWaterMark(NULL)); //Only for debug. You can see the watermark of the free resources assigned by the xTaskCreatePinnedToCore() function.
   }
   vTaskDelay(1);
 }
@@ -341,6 +457,12 @@ void drawBank() {
   matrix.writeDisplay();
 }
 
+void drawChar(char c) {
+  matrix.clear();
+  matrix.drawChar(1, 1, c, 1, 0, 1);
+  matrix.writeDisplay();
+}
+
 void drawSmile() {
   matrix.clear();
   matrix.drawBitmap(0, 0, smile_bmp, 8, 8, LED_ON);
@@ -364,10 +486,3 @@ void drawHeart() {
   matrix.drawBitmap(0, 0, heart_bmp, 8, 8, LED_ON);
   matrix.writeDisplay();
 }
-
-/*
-void rootPage() {
-  char content[] = "Three";
-  Server.send(200, "text/plain", content);
-}
-*/
