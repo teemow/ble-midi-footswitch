@@ -8,6 +8,8 @@
 #include <ESPmDNS.h>
 #include <ArduinoOTA.h>
 #include <WiFiManager.h>
+#include <WebServer.h>
+#include <ArduinoJson.h>
 
 // bluetooth midi
 #include <BLEMIDI_Transport.h>
@@ -71,6 +73,21 @@ unsigned long debounceDelay = 30;
 // from AUM selects + replays a scene by its trigger.
 scenes::Store sceneStore;
 int currentScene = 0;
+
+// The store is read from the MIDI task (inbound triggers) and the loop task
+// (foot nav + the Phase 2 HTTP push that mutates it). A recursive mutex
+// serialises every access so a push can never reallocate the scene vector while
+// a replay holds a Scene*. Recursive so selectScene()->replaySelected()->draw
+// can each lock without deadlocking. Held briefly except during replay (which
+// only happens at design time / between songs, when no push is in flight).
+SemaphoreHandle_t sceneMux = nullptr;
+inline void lockScenes()   { if (sceneMux) xSemaphoreTakeRecursive(sceneMux, portMAX_DELAY); }
+inline void unlockScenes() { if (sceneMux) xSemaphoreGiveRecursive(sceneMux); }
+
+// Scene push + introspection over WiFi (Phase 2). Design-time only: the
+// mcp-midi-controller compiles a scene and POSTs it here; live shows are
+// BLE-only. Plain HTTP on the trusted home network, same trust model as OTA.
+WebServer httpServer(80);
 
 // Fixed transport CCs for the action switches (SW2..SW5), sent to AUM on ch 1
 // val 127. These are decoupled from scene selection (SW3 stop/rewind, SW4
@@ -144,11 +161,16 @@ void blinkLEDGreen(int ms);
 void blinkLEDBlue(int ms);
 void blinkAllLEDs(int ms);
 void setupOTA();
+void setupHTTP();
 void startConfigPortal();
 void maybeSetupWiFi(bool startPortal);
 
 void setup() {
   Serial.begin(115200);
+
+  // Created before the scene store / inbound handlers so every store access is
+  // serialisable from the very first event.
+  sceneMux = xSemaphoreCreateRecursiveMutex();
 
   clearMatrix();
 
@@ -206,19 +228,25 @@ void setup() {
   // Inbound MIDI from AUM selects + replays a scene (the live in-song path:
   // AUM sends one message, "three" expands it into the scene's outgoing MIDI).
   MIDI.setHandleProgramChange([](byte channel, byte program) {
+    lockScenes();
     int i = sceneStore.matchProgramChange(channel, program);
     if (i >= 0) selectScene(i, true);
+    unlockScenes();
   });
 
   MIDI.setHandleControlChange([](byte channel, byte cc, byte value) {
+    lockScenes();
     int i = sceneStore.matchControlChange(channel, cc, value);
     if (i >= 0) selectScene(i, true);
+    unlockScenes();
   });
 
   MIDI.setHandleNoteOn([](byte channel, byte note, byte velocity) {
     digitalWrite(LED_BUILTIN, LOW);
+    lockScenes();
     int i = sceneStore.matchNoteOn(channel, note);
     if (i >= 0) selectScene(i, true);
+    unlockScenes();
   });
 
   MIDI.setHandleNoteOff([](byte channel, byte note, byte velocity) {
@@ -227,7 +255,9 @@ void setup() {
 
   // Mount the scene store (LittleFS /scenes). Best-effort: a missing/empty store
   // just means no scenes to replay yet (the mcp server pushes them in Phase 2).
+  lockScenes();
   sceneStore.begin();
+  unlockScenes();
 
   //See FreeRTOS for more multitask info
   xTaskCreatePinnedToCore(
@@ -264,15 +294,19 @@ void setup() {
 
 void loop() {
 
-  // Service OTA when on WiFi (non-blocking until an update actually streams).
+  // Service OTA + the scene-push HTTP server when on WiFi (both non-blocking
+  // until an update/request actually streams).
   if (wifiReady) {
     ArduinoOTA.handle();
+    httpServer.handleClient();
   }
 
   // upper red: next scene (foot fallback for selecting + replaying a scene).
   if (buttonPressed(0)) {
     digitalWrite(led_pins[0], HIGH);
+    lockScenes();
     selectScene(currentScene + 1, true);
+    unlockScenes();
     vTaskDelay(250/portTICK_PERIOD_MS);
     digitalWrite(led_pins[0], LOW);
   }
@@ -280,7 +314,9 @@ void loop() {
   // lower red: previous scene.
   if (buttonPressed(1)) {
     digitalWrite(led_pins[1], HIGH);
+    lockScenes();
     selectScene(currentScene - 1, true);
+    unlockScenes();
     vTaskDelay(250/portTICK_PERIOD_MS);
     digitalWrite(led_pins[1], LOW);
   }
@@ -317,6 +353,7 @@ void maybeSetupWiFi(bool startPortal) {
     Serial.print("WiFi connected: ");
     Serial.println(WiFi.localIP());
     setupOTA();
+    setupHTTP();
   } else {
     Serial.println("WiFi not connected (BLE-only). Hold SW0 at boot to configure.");
     WiFi.disconnect(true);   // free the radio for BLE if we are not using WiFi
@@ -336,6 +373,7 @@ void startConfigPortal() {
     Serial.print("WiFi configured + connected: ");
     Serial.println(WiFi.localIP());
     setupOTA();
+    setupHTTP();
   } else {
     Serial.println("Config portal timed out; continuing BLE-only.");
     WiFi.disconnect(true);
@@ -364,6 +402,101 @@ void setupOTA() {
 
   ArduinoOTA.begin();
   Serial.println("OTA ready (hostname: three.local)");
+}
+
+// --- Scene push HTTP API (Phase 2) -----------------------------------------
+//
+// The mcp-midi-controller compiles a song's scene into the on-device schema
+// (see data/scenes/README.md) and pushes it here. Endpoints:
+//
+//   GET    /            -> plain-text status (scene count + names)
+//   GET    /scenes      -> JSON array of {id,name,bank,events} currently loaded
+//   POST   /scenes      -> body is one compiled scene JSON; stored + hot-reloaded
+//                          (?id=<stem> overrides the filename, else the body "id")
+//   DELETE /scenes?id=  -> remove a stored scene
+//
+// Unauthenticated by design: same trust model as OTA (a private LAN), and the
+// repo is public so no endpoint/credential is baked in here.
+
+void handleHttpRoot() {
+  String body = "three: BLE-MIDI scene player\n";
+  lockScenes();
+  body += "scenes: " + String(sceneStore.count()) + "\n";
+  for (size_t i = 0; i < sceneStore.count(); i++) {
+    const scenes::Scene* sc = sceneStore.at(i);
+    if (sc) body += "  - " + sc->id + " (" + sc->name + ")\n";
+  }
+  unlockScenes();
+  httpServer.send(200, "text/plain", body);
+}
+
+void handleHttpListScenes() {
+  JsonDocument doc;
+  JsonArray arr = doc.to<JsonArray>();
+  lockScenes();
+  for (size_t i = 0; i < sceneStore.count(); i++) {
+    const scenes::Scene* sc = sceneStore.at(i);
+    if (!sc) continue;
+    JsonObject o = arr.add<JsonObject>();
+    o["id"] = sc->id;
+    o["name"] = sc->name;
+    o["bank"] = sc->bank;
+    o["events"] = sc->events.size();
+  }
+  unlockScenes();
+  String out;
+  serializeJson(doc, out);
+  httpServer.send(200, "application/json", out);
+}
+
+void handleHttpPostScene() {
+  if (!httpServer.hasArg("plain") || httpServer.arg("plain").isEmpty()) {
+    httpServer.send(400, "text/plain", "empty body; POST the scene JSON\n");
+    return;
+  }
+  String id = httpServer.hasArg("id") ? httpServer.arg("id") : String();
+  String body = httpServer.arg("plain");
+
+  String err;
+  lockScenes();
+  bool ok = sceneStore.save(id, body, err);
+  size_t total = sceneStore.count();
+  unlockScenes();
+
+  if (!ok) {
+    httpServer.send(400, "text/plain", "scene rejected: " + err + "\n");
+    return;
+  }
+  httpServer.send(200, "text/plain",
+                  "stored; " + String(total) + " scene(s) loaded\n");
+}
+
+void handleHttpDeleteScene() {
+  if (!httpServer.hasArg("id")) {
+    httpServer.send(400, "text/plain", "missing ?id=<scene>\n");
+    return;
+  }
+  String id = httpServer.arg("id");
+  lockScenes();
+  bool ok = sceneStore.remove(id);
+  size_t total = sceneStore.count();
+  unlockScenes();
+
+  if (!ok) {
+    httpServer.send(404, "text/plain", "no such scene: " + id + "\n");
+    return;
+  }
+  httpServer.send(200, "text/plain",
+                  "removed; " + String(total) + " scene(s) loaded\n");
+}
+
+void setupHTTP() {
+  httpServer.on("/", HTTP_GET, handleHttpRoot);
+  httpServer.on("/scenes", HTTP_GET, handleHttpListScenes);
+  httpServer.on("/scenes", HTTP_POST, handleHttpPostScene);
+  httpServer.on("/scenes", HTTP_DELETE, handleHttpDeleteScene);
+  httpServer.begin();
+  Serial.println("HTTP scene API ready on port 80 (POST /scenes)");
 }
 
 /**
@@ -551,10 +684,13 @@ void clearMatrix() {
 // empty (no scenes pushed yet).
 void drawScene() {
   matrix.clear();
-  if (sceneStore.empty()) {
+  lockScenes();
+  bool empty = sceneStore.empty();
+  uint8_t d = empty ? 0 : sceneStore.displayDigit(currentScene);
+  unlockScenes();
+  if (empty) {
     matrix.drawChar(1, 1, '-', 1, 0, 1);
   } else {
-    uint8_t d = sceneStore.displayDigit(currentScene);
     matrix.drawChar(1, 1, d + 48, 1, 0, 1);
   }
   matrix.writeDisplay();

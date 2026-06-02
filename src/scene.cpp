@@ -39,6 +39,20 @@ uint8_t clampChannel(int v) {
   return static_cast<uint8_t>(v);
 }
 
+// Reduce an arbitrary id to a safe flash filename stem ([A-Za-z0-9_-]); any
+// other rune becomes '_'. Empty input yields "scene".
+String sanitizeId(const String& in) {
+  String out;
+  for (size_t i = 0; i < in.length(); i++) {
+    char c = in[i];
+    bool ok = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+              (c >= '0' && c <= '9') || c == '-' || c == '_';
+    out += ok ? c : '_';
+  }
+  if (out.isEmpty()) out = "scene";
+  return out;
+}
+
 // Some scene authors number the controller field "controller" (mirrors the mcp
 // server's CC control), others "number"/"data1". Accept any of them.
 int firstInt(JsonObjectConst o, std::initializer_list<const char*> keys, int dflt) {
@@ -169,19 +183,8 @@ bool Store::loadFile(const String& path, Scene& out) const {
   return true;
 }
 
-bool Store::begin() {
+bool Store::scanDir() {
   scenes_.clear();
-
-  if (!LittleFS.begin(true /* formatOnFail */)) {
-    Serial.println("scene: LittleFS mount failed");
-    return false;
-  }
-
-  if (!LittleFS.exists(kScenesDir)) {
-    LittleFS.mkdir(kScenesDir);
-    Serial.println("scene: created /scenes (empty store)");
-    return true;
-  }
 
   File dir = LittleFS.open(kScenesDir);
   if (!dir || !dir.isDirectory()) {
@@ -208,6 +211,88 @@ bool Store::begin() {
   Serial.print("scene: loaded ");
   Serial.print(scenes_.size());
   Serial.println(" scene(s)");
+  return true;
+}
+
+bool Store::begin() {
+  scenes_.clear();
+
+  if (!LittleFS.begin(true /* formatOnFail */)) {
+    Serial.println("scene: LittleFS mount failed");
+    return false;
+  }
+
+  if (!LittleFS.exists(kScenesDir)) {
+    LittleFS.mkdir(kScenesDir);
+    Serial.println("scene: created /scenes (empty store)");
+    return true;
+  }
+
+  return scanDir();
+}
+
+bool Store::reload() {
+  if (!LittleFS.exists(kScenesDir)) {
+    LittleFS.mkdir(kScenesDir);
+  }
+  return scanDir();
+}
+
+bool Store::save(const String& id, const String& json, String& err) {
+  // Validate before touching flash: must parse and carry an events array, so a
+  // malformed push can never leave a corrupt file that breaks the next boot.
+  JsonDocument doc;
+  DeserializationError perr = deserializeJson(doc, json);
+  if (perr) {
+    err = String("parse error: ") + perr.c_str();
+    return false;
+  }
+  JsonObjectConst root = doc.as<JsonObjectConst>();
+  if (root.isNull()) {
+    err = "body is not a JSON object";
+    return false;
+  }
+  if (!root["events"].is<JsonArrayConst>()) {
+    err = "missing events array";
+    return false;
+  }
+
+  String stem = id;
+  if (stem.isEmpty() && root["id"].is<const char*>()) {
+    stem = root["id"].as<const char*>();
+  }
+  stem = sanitizeId(stem);
+
+  String path = String(kScenesDir) + "/" + stem + ".json";
+  if (!LittleFS.exists(kScenesDir)) {
+    LittleFS.mkdir(kScenesDir);
+  }
+  File f = LittleFS.open(path, "w");
+  if (!f) {
+    err = String("cannot open ") + path + " for write";
+    return false;
+  }
+  size_t n = f.print(json);
+  f.close();
+  if (n != json.length()) {
+    err = "short write to flash";
+    return false;
+  }
+
+  Serial.print("scene: saved ");
+  Serial.println(path);
+  return reload();
+}
+
+bool Store::remove(const String& id) {
+  String path = String(kScenesDir) + "/" + sanitizeId(id) + ".json";
+  if (!LittleFS.exists(path)) {
+    return false;
+  }
+  LittleFS.remove(path);
+  Serial.print("scene: removed ");
+  Serial.println(path);
+  reload();
   return true;
 }
 

@@ -131,12 +131,30 @@ to a laptop and `aseqdump`'d, every switch was pressed and captured:
   replay blocks the MIDI-read task; fine for short scenes).
 - Decide scene-cursor display for >9 scenes (single matrix digit today).
 
-### Phase 2 — Provisioning protocol (mcp server → footswitch)
+### Phase 2 — Provisioning protocol (mcp server → footswitch) — DONE, hardware-verified
 
-- Primary: small **HTTP endpoint over WiFi** on the footswitch that accepts a
-  scene bundle (the mcp server POSTs compiled scenes).
-- Fallback: **BLE-MIDI SysEx** transfer for when WiFi is unavailable.
-- mcp-midi-controller side: add an "export scene(s) to footswitch" capability.
+- **Device HTTP endpoint.** When on WiFi, `three` serves a scene-push API on
+  port 80: `POST /scenes` (validate → write `/scenes/<id>.json` → hot-reload),
+  `GET /scenes` (list loaded), `DELETE /scenes?id=` (remove), `GET /` (status).
+  Pushes are validated before any flash write so a bad push can't corrupt the
+  store; access to the store is serialised with a recursive mutex against the
+  inbound-MIDI replay task. Schema + examples in `data/scenes/README.md`.
+  Unauthenticated, same trust model as OTA (private LAN). **`POST /scenes`
+  requires `Content-Type: application/json`** — a form-encoded body (curl's
+  default) is rejected `400 "empty body"`, because the ESP32 `WebServer` only
+  exposes a non-form body as the `plain` arg.
+- mcp-midi-controller side: an `export_scene_to_footswitch` tool compiles a
+  stored scene (resolving PC-before-CC ordering + per-device settle) into this
+  exact schema and POSTs it.
+- **Verified end-to-end on the rig (2026-06-03):** a scene compiled from the mcp
+  bindings was pushed over HTTP, stored + hot-reloaded, then triggered by an
+  inbound Program Change; `three` replayed the events over BLE, a host relay
+  forwarded them to the WIDI Thru6, and the target pedal (H90) recalled the
+  program. This also surfaced a binding channel off-by-one (fixed in the mcp
+  rig config) — the *push/replay* path itself was correct.
+- Fallback (later): **BLE-MIDI SysEx** transfer for when WiFi is unavailable.
+- Known sharp edge: when two scenes share an inbound trigger, the matcher fires
+  the first match. The mcp export tool should warn on duplicate triggers.
 
 ### Phase 3 — X32 over WiFi/OSC
 

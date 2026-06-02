@@ -1,9 +1,37 @@
 # On-device scene store (`/scenes` on LittleFS)
 
 Each `*.json` file here is one **compiled scene**. The firmware loads them all at
-boot. In Phase 2 the `mcp-midi-controller` server pushes these files over WiFi;
-for now they can be flashed with `pio run -t uploadfs` (uploads this whole
-`data/` directory to the device's LittleFS partition).
+boot. They can be flashed with `pio run -t uploadfs` (uploads this whole `data/`
+directory to the device's LittleFS partition), or pushed live over WiFi by the
+`mcp-midi-controller` server (Phase 2, see below).
+
+## Scene push HTTP API (Phase 2)
+
+When on WiFi, `three` serves a small HTTP API on port 80 so the mcp server can
+push compiled scenes without a re-flash (same trust model as OTA — a private
+LAN, unauthenticated):
+
+| Method | Path | Body / args | Effect |
+|--------|------|-------------|--------|
+| `GET` | `/` | — | plain-text status (scene count + names) |
+| `GET` | `/scenes` | — | JSON array of `{id,name,bank,events}` loaded |
+| `POST` | `/scenes` | one scene JSON (this schema); `?id=<stem>` overrides the filename, else the body `id` | validate → write `/scenes/<id>.json` → hot-reload |
+| `DELETE` | `/scenes?id=<stem>` | — | remove a stored scene + reload |
+
+A push is validated (must parse and carry an `events` array) before any flash
+write, so a bad push can never corrupt the store. The mcp side resolves all
+recall semantics (ordering/settle/additive-exact) at compile time and emits this
+exact schema; `three` stays a faithful player.
+
+`POST /scenes` **requires `Content-Type: application/json`**. The ESP32
+`WebServer` only exposes a request body as the `plain` arg when it is *not*
+form-encoded, so a default `curl --data` (which sends
+`application/x-www-form-urlencoded`) is rejected with `400 "empty body"`. Use:
+
+```
+curl -X POST -H 'Content-Type: application/json' \
+     --data-binary @example-verse.json http://three.local/scenes
+```
 
 ## Scene schema
 

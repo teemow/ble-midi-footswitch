@@ -72,6 +72,20 @@ class Store {
   // every scene file. Returns false only if the filesystem cannot be mounted.
   bool begin();
 
+  // Re-scans /scenes and rebuilds the in-RAM set (assumes LittleFS is already
+  // mounted by begin()). Used after a scene is pushed/removed over HTTP so the
+  // change takes effect without a reboot.
+  bool reload();
+
+  // Validates and persists one pushed scene as /scenes/<id>.json (Phase 2 push),
+  // then reloads the store. `id` is sanitised to [A-Za-z0-9_-]; if empty it
+  // falls back to the scene's own "id" field. On failure returns false and sets
+  // err. Mutates the in-RAM set, so callers must serialise it against replay.
+  bool save(const String& id, const String& json, String& err);
+
+  // Deletes /scenes/<id>.json and reloads. Returns false if the file is absent.
+  bool remove(const String& id);
+
   size_t count() const { return scenes_.size(); }
   bool empty() const { return scenes_.empty(); }
   const Scene* at(size_t i) const;
@@ -88,6 +102,8 @@ class Store {
  private:
   std::vector<Scene> scenes_;
 
+  // Scans /scenes and rebuilds scenes_ (LittleFS must already be mounted).
+  bool scanDir();
   bool loadFile(const String& path, Scene& out) const;
 };
 
