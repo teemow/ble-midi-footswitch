@@ -156,11 +156,41 @@ to a laptop and `aseqdump`'d, every switch was pressed and captured:
 - Known sharp edge: when two scenes share an inbound trigger, the matcher fires
   the first match. The mcp export tool should warn on duplicate triggers.
 
-### Phase 3 — X32 over WiFi/OSC
+### Phase 3 — X32 over WiFi/OSC (DONE — hardware-verified)
 
-- Send **OSC/UDP** to the X32 from the footswitch as part of scene replay (mixer
-  scene/mute/fader recall). Reuse the verified OSC address knowledge from the
-  mcp project's X32 research.
+- Scenes can now carry **`osc` events** alongside their MIDI events. During
+  replay, MIDI still goes to AUM over BLE-MIDI; each `osc` event is encoded as an
+  OSC 1.0 message and sent **UDP** to the mixer (the X32). So one footswitch
+  press recalls the song's pedal state *and* its mixer state.
+- **Schema** (`data/scenes/README.md`): an `osc` event is
+  `{ "type": "osc", "osc_addr": "/ch/01/mix/fader", "osc_types": "f",
+  "osc_args": [0.75], "host": "<ip>", "port": 10023 }`. `osc_types` is one tag
+  char per arg (`f`/`i`/`s`) because JSON cannot tell float `1.0` from int `1`
+  and the X32 cares. `host`/`port` are the UDP target; the mcp server bakes them
+  from the X32 binding's endpoint so the scene is self-describing.
+- **Parser** (`src/scene.cpp`): `EventType::Osc` + a tagged `OscArg` vector.
+- **Sender** (`src/main.cpp`, `sendOsc`): a minimal OSC encoder (address,
+  comma-led type-tag, big-endian args, all 4-byte padded) over a single
+  `WiFiUDP`. Best-effort: it **no-ops when WiFi is down**, so a BLE-only boot
+  still replays the scene's MIDI; only the mixer part is skipped.
+- mcp side: `export_scene_to_footswitch` no longer skips OSC devices — it
+  renders the X32's controls to `osc` events with the type-tag + endpoint baked
+  in. Example: `data/scenes/example-x32.json`.
+- **Caveat (live):** driving the X32 in a show means the footswitch must hold
+  **WiFi *and* BLE at once** (the ESP32 time-slices the shared 2.4 GHz radio).
+  Best-effort WiFi at boot already exists.
+- **Verified end-to-end on hardware (2026-06-03):** USB-flashed the OSC build;
+  the device came up on WiFi *and* accepted a BLE central connection at the same
+  time (BLE+WiFi coexistence confirmed). Pushed a compiled scene whose three
+  `osc` events targeted a live X32 RACK on the LAN (one `s`, one `f`, one `i`
+  arg, all on an unused input channel), sent the matching Program Change in over
+  BLE, and the footswitch replayed: the serial log showed
+  `scene: replay ... / osc: <addr> -> <ip>:10023` for each event, and an
+  independent OSC read-back of the console confirmed the scribble name, fader
+  and on/off all changed to the compiled values (then restored). Float
+  round-trips through the X32's own fader quantization (`0.25` → `0.2493`), as
+  expected. This proves the full path: compile → HTTP push → BLE trigger →
+  WiFi/OSC out to the mixer.
 
 ### Phase 4 — Live routing + polish
 

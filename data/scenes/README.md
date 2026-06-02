@@ -49,7 +49,9 @@ curl -X POST -H 'Content-Type: application/json' \
   "events": [                     // outgoing wire events, already ordered
     { "type": "program_change", "channel": 2, "program": 12, "delay_ms": 80 },
     { "type": "cc",             "channel": 2, "controller": 28, "value": 127 },
-    { "type": "cc",             "channel": 3, "controller": 17, "value": 64 }
+    { "type": "cc",             "channel": 3, "controller": 17, "value": 64 },
+    { "type": "osc", "osc_addr": "/ch/01/mix/fader", "osc_types": "f",
+      "osc_args": [0.75], "host": "192.168.1.50", "port": 10023 }
   ]
 }
 ```
@@ -65,9 +67,44 @@ curl -X POST -H 'Content-Type: application/json' \
   the rig). SW0/SW1 also step through scenes by foot as a manual fallback.
 - Event types: `cc` (`controller`, `value`), `program_change` (`program`),
   `note_on`/`note_off` (`note`, `velocity`), `sysex` (`bytes`: full array
-  including the `0xF0`/`0xF7` boundaries). `channel` is 1..16.
+  including the `0xF0`/`0xF7` boundaries), and `osc` (see below). `channel` is
+  1..16 (MIDI events only; `osc` ignores it).
 - Unknown keys (e.g. a per-event `comment`) are ignored by the parser, so they
   are safe to use for documenting raw SysEx byte arrays in place.
+
+### OSC events (Phase 3 — the X32 over WiFi)
+
+An `osc` event sends an OSC/UDP message to a mixer (the Behringer X32) as part of
+the same scene replay that drives the pedals over BLE-MIDI. The MIDI events still
+go to AUM over BLE; the `osc` events go straight to the mixer over WiFi.
+
+| Field | Meaning |
+|-------|---------|
+| `osc_addr` | the OSC address pattern, e.g. `/ch/01/mix/fader`, `/-action/goscene` |
+| `osc_types` | one tag char **per arg**: `f` = float32, `i` = int32, `s` = string |
+| `osc_args` | the args, in order (matched positionally to `osc_types`) |
+| `host` | the mixer's IP/hostname (baked from the device's mcp binding) |
+| `port` | UDP port (X32 = `10023`; defaults to `10023` if omitted) |
+
+`osc_types` is required because JSON numbers cannot distinguish a float `1.0`
+from an int `1`, and the X32 cares (a fader is float `0.0..1.0`, `mix/on` is int
+`0/1`). The mcp server's `export_scene_to_footswitch` bakes the type-tag, the
+args, and the UDP target (from the X32 binding's `host:port` endpoint) so the
+scene is self-describing — the footswitch needs no rig config of its own.
+
+OSC send is **best-effort and gated on WiFi**: if the device booted BLE-only
+(no WiFi), `osc` events are silently skipped and the BLE-MIDI events in the same
+scene still play. So driving the X32 live requires the footswitch to be on WiFi
+*and* BLE at once (the ESP32 time-slices the shared 2.4 GHz radio).
+
+Common X32 addresses (full map: `mcp-midi-controller/docs/research/x32.md`):
+
+| What | `osc_addr` | `osc_types` | `osc_args` |
+|------|-----------|-------------|------------|
+| Channel 1 fader (0.0–1.0) | `/ch/01/mix/fader` | `f` | `[0.75]` |
+| Channel 1 on/off | `/ch/01/mix/on` | `i` | `[1]` |
+| Recall console scene N | `/-action/goscene` | `i` | `[3]` |
+| Scribble-strip name | `/ch/01/config/name` | `s` | `["Bass"]` |
 
 ## Driving the Boss SL-2 over BLE (Roland DT1 SysEx)
 

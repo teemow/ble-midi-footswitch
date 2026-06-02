@@ -18,13 +18,25 @@
 
 namespace scenes {
 
-// Wire event kinds the footswitch can emit. OSC (X32) arrives in Phase 3.
+// Wire event kinds the footswitch can emit. OSC targets a mixer (the X32) over
+// WiFi/UDP; the rest go out over BLE-MIDI.
 enum class EventType : uint8_t {
   CC,
   ProgramChange,
   NoteOn,
   NoteOff,
   SysEx,
+  Osc,
+};
+
+// One OSC argument, tagged by its OSC type so the encoder picks the right wire
+// form (JSON numbers cannot distinguish float 1.0 from int 1). The mcp server
+// bakes the type-tag string (`osc_types`) alongside the raw `osc_args`.
+struct OscArg {
+  char tag = 'i';   // 'f' float32, 'i' int32, 's' string
+  float f = 0.0f;
+  int32_t i = 0;
+  String s;
 };
 
 // How AUM (or any peer) selects this scene over the inbound MIDI link.
@@ -43,6 +55,15 @@ struct Event {
   uint8_t data1 = 0;               // cc number / program / note
   uint8_t data2 = 0;               // cc value / velocity (ignored for PC)
   std::vector<uint8_t> sysex;      // full bytes incl. F0..F7 (SysEx only)
+
+  // OSC (Osc only): a UDP message to a mixer such as the X32. host/port are
+  // baked by the mcp compiler from the device's binding endpoint, so a scene is
+  // self-describing and the footswitch needs no rig config.
+  String oscAddr;                  // e.g. "/ch/01/mix/fader"
+  String oscHost;                  // UDP target host/IP
+  uint16_t oscPort = 10023;        // X32 OSC/UDP port
+  std::vector<OscArg> oscArgs;     // typed args
+
   uint16_t delayMs = 0;            // wait after sending this event
 };
 

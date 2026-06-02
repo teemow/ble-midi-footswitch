@@ -16,6 +16,7 @@ EventType parseEventType(const char* s) {
   if (!strcmp(s, "note_on")) return EventType::NoteOn;
   if (!strcmp(s, "note_off")) return EventType::NoteOff;
   if (!strcmp(s, "sysex")) return EventType::SysEx;
+  if (!strcmp(s, "osc")) return EventType::Osc;
   return EventType::CC;
 }
 
@@ -177,6 +178,45 @@ bool Store::loadFile(const String& path, Scene& out) const {
           ev.sysex.push_back(static_cast<uint8_t>(b.as<int>() & 0xFF));
         }
         break;
+      case EventType::Osc: {
+        ev.oscAddr = e["osc_addr"].is<const char*>()
+                         ? String(e["osc_addr"].as<const char*>())
+                         : String();
+        ev.oscHost = e["host"].is<const char*>()
+                         ? String(e["host"].as<const char*>())
+                         : String();
+        int port = firstInt(e, {"port"}, 10023);
+        if (port < 1 || port > 65535) port = 10023;
+        ev.oscPort = static_cast<uint16_t>(port);
+
+        // osc_types is one tag char per arg ('f'/'i'/'s'); fall back to int for
+        // any arg beyond the type string so a short/absent tag never crashes.
+        const char* types = e["osc_types"].is<const char*>()
+                                ? e["osc_types"].as<const char*>()
+                                : "";
+        size_t tlen = strlen(types);
+        size_t idx = 0;
+        for (JsonVariantConst a : e["osc_args"].as<JsonArrayConst>()) {
+          OscArg arg;
+          arg.tag = (idx < tlen) ? types[idx] : 'i';
+          switch (arg.tag) {
+            case 'f':
+              arg.f = a.as<float>();
+              break;
+            case 's':
+              arg.s = a.is<const char*>() ? String(a.as<const char*>()) : String();
+              break;
+            case 'i':
+            default:
+              arg.tag = 'i';
+              arg.i = a.as<int32_t>();
+              break;
+          }
+          ev.oscArgs.push_back(std::move(arg));
+          idx++;
+        }
+        break;
+      }
     }
     out.events.push_back(std::move(ev));
   }

@@ -5,6 +5,7 @@
 // the captive portal when SW0 (bank-up) is held at boot. OTA + mDNS come up
 // only when WiFi connected.
 #include <WiFi.h>
+#include <WiFiUdp.h>
 #include <ESPmDNS.h>
 #include <ArduinoOTA.h>
 #include <WiFiManager.h>
@@ -89,6 +90,13 @@ inline void unlockScenes() { if (sceneMux) xSemaphoreGiveRecursive(sceneMux); }
 // BLE-only. Plain HTTP on the trusted home network, same trust model as OTA.
 WebServer httpServer(80);
 
+// Phase 3: OSC/UDP to a mixer (the X32) as part of scene replay. Each OSC event
+// in a compiled scene carries its own UDP target (host/port baked from the
+// device binding), so this one socket fans out to whatever the scene addresses.
+// Sends are best-effort and only happen when WiFi is up; the BLE-MIDI live path
+// is never gated on it.
+WiFiUDP oscUdp;
+
 // Fixed transport CCs for the action switches (SW2..SW5), sent to AUM on ch 1
 // val 127. These are decoupled from scene selection (SW3 stop/rewind, SW4
 // record, SW5 play; SW2 free). Adjust to match the AUM MIDI mapping. Indices
@@ -147,6 +155,7 @@ static const uint8_t PROGMEM
 void clearMatrix();
 void drawScene();
 void replayScene(const scenes::Scene &sc);
+void sendOsc(const scenes::Event &ev);
 void replaySelected();
 void selectScene(int index, bool replay);
 void drawSmile();
@@ -559,11 +568,86 @@ void replayScene(const scenes::Scene &sc) {
           MIDI.sendSysEx(ev.sysex.size(), ev.sysex.data(), true);
         }
         break;
+      case scenes::EventType::Osc:
+        sendOsc(ev);
+        break;
     }
     if (ev.delayMs > 0) {
       vTaskDelay(ev.delayMs / portTICK_PERIOD_MS);
     }
   }
+}
+
+// --- OSC/UDP (Phase 3) ------------------------------------------------------
+//
+// Minimal OSC 1.0 encoder: an address pattern, a comma-led type-tag string, and
+// the args, each section null-terminated and zero-padded to a 4-byte boundary.
+// Built into a heap vector so an over-long string arg can never overflow a
+// stack buffer (replay is occasional, between songs).
+
+namespace {
+
+void oscAppendString(std::vector<uint8_t> &b, const char *s) {
+  for (const char *p = s; *p; ++p) b.push_back(static_cast<uint8_t>(*p));
+  b.push_back(0);
+  while (b.size() % 4 != 0) b.push_back(0);
+}
+
+void oscAppendU32(std::vector<uint8_t> &b, uint32_t v) {
+  b.push_back((v >> 24) & 0xFF);  // OSC is big-endian
+  b.push_back((v >> 16) & 0xFF);
+  b.push_back((v >> 8) & 0xFF);
+  b.push_back(v & 0xFF);
+}
+
+}  // namespace
+
+// Encode + send one OSC event over UDP. Best-effort: silently no-ops when WiFi
+// is down or the target/address is missing, so a mixer event in a scene never
+// blocks the BLE-MIDI replay of the same scene.
+void sendOsc(const scenes::Event &ev) {
+  if (!wifiReady) return;
+  if (ev.oscAddr.isEmpty() || ev.oscHost.isEmpty()) return;
+
+  std::vector<uint8_t> buf;
+  oscAppendString(buf, ev.oscAddr.c_str());
+
+  String tags = ",";
+  for (const scenes::OscArg &a : ev.oscArgs) tags += a.tag;
+  oscAppendString(buf, tags.c_str());
+
+  for (const scenes::OscArg &a : ev.oscArgs) {
+    switch (a.tag) {
+      case 'f': {
+        uint32_t bits;
+        memcpy(&bits, &a.f, sizeof(bits));
+        oscAppendU32(buf, bits);
+        break;
+      }
+      case 's':
+        oscAppendString(buf, a.s.c_str());
+        break;
+      case 'i':
+      default:
+        oscAppendU32(buf, static_cast<uint32_t>(a.i));
+        break;
+    }
+  }
+
+  if (oscUdp.beginPacket(ev.oscHost.c_str(), ev.oscPort) != 1) {
+    Serial.print("osc: cannot resolve ");
+    Serial.println(ev.oscHost);
+    return;
+  }
+  oscUdp.write(buf.data(), buf.size());
+  oscUdp.endPacket();
+
+  Serial.print("osc: ");
+  Serial.print(ev.oscAddr);
+  Serial.print(" -> ");
+  Serial.print(ev.oscHost);
+  Serial.print(":");
+  Serial.println(ev.oscPort);
 }
 
 void replaySelected() {
