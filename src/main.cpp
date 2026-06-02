@@ -169,6 +169,16 @@ void setup() {
 
   MIDI.begin(MIDI_CHANNEL_OMNI);
 
+  // Request a larger ATT MTU than the 23-byte BLE default. The NimBLE backend
+  // sends every BLE-MIDI packet as one notify(), so a packet cannot exceed
+  // (MTU - 3) bytes. The SL-2 is driven over BLE with Roland DT1 SysEx, and a
+  // single DT1 frame is up to ~19 bytes (e.g. a 4-nibble SYSTEM TEMPO write) ->
+  // ~22 bytes on the wire once the BLE-MIDI header/timestamps are added, which
+  // overflows the default 20-byte payload and silently truncates the SysEx.
+  // 247 covers any single SL-2 DT1 frame; the central negotiates down if it
+  // cannot support it. MIDI.begin() above already ran BLEDevice::init().
+  NimBLEDevice::setMTU(247);
+
   BLEMIDI.setHandleConnected([]() {
     Serial.println("---------CONNECTED---------");
     isConnected = true;

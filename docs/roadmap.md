@@ -108,6 +108,21 @@ to a laptop and `aseqdump`'d, every switch was pressed and captured:
   switch + MIDI verified working; cosmetic LED repair tracked in the private rig
   notes, not a firmware issue.)
 
+- **SL-2 control over BLE (Roland DT1 SysEx).** The footswitch can now drive a
+  Boss SL-2 with no laptop: scenes carry Roland DT1 frames (`F0 41 10 00 00 00 00
+  1D 12 …`) that the SL-2 parses on its TRS MIDI IN through the WIDI hub. This
+  reaches what the manual calls impossible over MIDI — **live preset recall**
+  (`PATCH_SELECT 0x7F000100`) and **slicer pattern/type/tempo** (temp patch
+  `0x20000000…`, SYSTEM tempo `0x10000000`) — plus the three channel-voice CCs
+  (on/off 80, EXP 16, tap 81). Reference scene `data/scenes/example-sl2.json`;
+  the framing + checksum recipe and address/CC map are in
+  `data/scenes/README.md`. The replay engine already emits `sysex` events
+  faithfully (the mcp server bakes the checksummed bytes); the only firmware
+  change needed was **raising the BLE MTU** (`NimBLEDevice::setMTU(247)`) so a
+  full DT1 frame fits one notification instead of being truncated at the 20-byte
+  default payload. *Still to do: verify on the rig (the obvious next test is a
+  live `PATCH_SELECT` preset switch).*
+
 **Remaining for Phase 1 (next):**
 
 - **Confirm the transport CC numbers (60–63) match the live AUM mapping** — needs
