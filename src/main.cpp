@@ -1,10 +1,16 @@
 #include <Arduino.h>
 
 // WiFi + OTA (Phase 0). WiFi is best-effort and must never block the live
-// BLE-MIDI path: we try saved credentials with a short timeout, and only open
-// the captive portal when SW0 (bank-up) is held at boot. OTA + mDNS come up
-// only when WiFi connected.
+// BLE-MIDI path: we try the known networks (home, practice room, ...) with a
+// short timeout, then any captive-portal credential, and only open the portal
+// when SW0 (bank-up) is held at boot. OTA + mDNS come up only when connected.
+//
+// Multi-network roaming: the footswitch travels between fixed locations (home,
+// Moritz's practice room, ...). WiFiMulti scans on boot and joins the strongest
+// reachable known AP, so the same firmware works at every location with no
+// reconfiguration. Credentials live in include/secrets.h (gitignored).
 #include <WiFi.h>
+#include <WiFiMulti.h>
 #include <WiFiUdp.h>
 #include <ESPmDNS.h>
 #include <ArduinoOTA.h>
@@ -52,6 +58,25 @@ BLEMIDI_CREATE_INSTANCE("ThreeFoot", MIDI);
 static const char *OTA_HOSTNAME = "three";      // -> three.local for espota
 static const char *AP_SSID = "THREE";            // captive portal SSID
 static const unsigned long WIFI_CONNECT_TIMEOUT_MS = 8000;
+
+// Known networks the footswitch should roam between (home, practice room, ...).
+// Defined in include/secrets.h via the WIFI_NET(ssid, pass) X-macro so real
+// SSIDs/passwords stay out of this public repo. Empty if secrets.h is absent —
+// the device then relies on a captive-portal credential / the portal itself.
+struct WifiNetwork { const char *ssid; const char *pass; };
+static const WifiNetwork kWifiNetworks[] = {
+#ifdef WIFI_NETWORKS
+#define WIFI_NET(ssid, pass) {ssid, pass},
+  WIFI_NETWORKS
+#undef WIFI_NET
+#endif
+};
+static const size_t kWifiNetworkCount =
+    sizeof(kWifiNetworks) / sizeof(kWifiNetworks[0]);
+
+// Scans on boot and connects to the strongest reachable network from the list
+// above. Lets one firmware roam between locations without reconfiguration.
+WiFiMulti wifiMulti;
 
 bool wifiReady = false;
 bool otaInProgress = false;
@@ -348,18 +373,36 @@ void maybeSetupWiFi(bool startPortal) {
     return;
   }
 
-  // Best-effort connect using credentials saved by a previous portal run.
   drawChar('w');
-  WiFi.begin();
-  unsigned long start = millis();
-  while (WiFi.status() != WL_CONNECTED &&
-         (millis() - start) < WIFI_CONNECT_TIMEOUT_MS) {
-    delay(100);
+
+  // 1. Known networks from secrets.h (home, practice room, ...). WiFiMulti
+  //    scans and joins the strongest reachable one, so the same firmware roams
+  //    between locations with no reconfiguration.
+  bool connected = false;
+  if (kWifiNetworkCount > 0) {
+    for (size_t i = 0; i < kWifiNetworkCount; i++) {
+      wifiMulti.addAP(kWifiNetworks[i].ssid, kWifiNetworks[i].pass);
+    }
+    connected = (wifiMulti.run(WIFI_CONNECT_TIMEOUT_MS) == WL_CONNECTED);
   }
 
-  if (WiFi.status() == WL_CONNECTED) {
+  // 2. Fall back to a credential saved by an earlier captive-portal run (an
+  //    ad-hoc network that is not baked into secrets.h).
+  if (!connected) {
+    WiFi.begin();
+    unsigned long start = millis();
+    while (WiFi.status() != WL_CONNECTED &&
+           (millis() - start) < WIFI_CONNECT_TIMEOUT_MS) {
+      delay(100);
+    }
+    connected = (WiFi.status() == WL_CONNECTED);
+  }
+
+  if (connected) {
     wifiReady = true;
     Serial.print("WiFi connected: ");
+    Serial.print(WiFi.SSID());
+    Serial.print(" @ ");
     Serial.println(WiFi.localIP());
     setupOTA();
     setupHTTP();
