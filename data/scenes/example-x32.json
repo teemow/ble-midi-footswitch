@@ -1,0 +1,12 @@
+{
+  "id": "example-x32",
+  "name": "Example X32 Mixer Recall",
+  "bank": 2,
+  "trigger": { "type": "program_change", "channel": 1, "number": 1 },
+  "comment": "host/port are omitted on purpose (this repo is public). The mcp server bakes the X32 host:port from its binding on push; without a host these osc events are no-ops.",
+  "events": [
+    { "type": "osc", "osc_addr": "/-action/goscene", "osc_types": "i", "osc_args": [3] },
+    { "type": "osc", "osc_addr": "/ch/01/mix/on", "osc_types": "i", "osc_args": [1] },
+    { "type": "osc", "osc_addr": "/ch/01/mix/fader", "osc_types": "f", "osc_args": [0.75] }
+  ]
+}

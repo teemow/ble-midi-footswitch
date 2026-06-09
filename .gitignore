@@ -1,0 +1,8 @@
+.pio/
+.vscode/
+*.bin
+*.elf
+
+# Local secrets (OTA / captive-portal passwords). Copy include/secrets.h.example
+# to include/secrets.h and set your own values there.
+include/secrets.h

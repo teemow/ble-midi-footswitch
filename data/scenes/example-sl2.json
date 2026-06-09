@@ -1,0 +1,40 @@
+{
+  "id": "example-sl2",
+  "name": "Example SL-2 (live preset + pattern over BLE)",
+  "bank": 2,
+  "_comment": "Showcase: drive a Boss SL-2 over BLE-MIDI with no laptop. The SL-2 has NO Program Change and the manual calls slicer Type/pattern front-panel-only, but it parses Roland DT1 SysEx on its TRS MIDI IN, so we recall a stored preset and override pattern/type/tempo live. DT1 is device-id based (0x10) and channel-independent; only the channel-voice CCs (on/off, EXP) use the SL-2 receive channel. See data/scenes/README.md for the framing + checksum recipe.",
+  "trigger": { "type": "program_change", "channel": 1, "number": 1 },
+  "events": [
+    {
+      "comment": "PATCH_SELECT: recall stored pattern 7 into the temp/live buffer (0x7F000100 = 00 07). This is live preset recall over MIDI, which the SL-2 manual says is impossible.",
+      "type": "sysex",
+      "bytes": [240, 65, 16, 0, 0, 0, 0, 29, 18, 127, 0, 1, 0, 0, 7, 121, 247],
+      "delay_ms": 40
+    },
+    {
+      "comment": "SLICER(1) PATTERN = 10 (temp patch 0x20001000, range 0-50). Overrides the recalled preset's pattern live.",
+      "type": "sysex",
+      "bytes": [240, 65, 16, 0, 0, 0, 0, 29, 18, 32, 0, 16, 0, 10, 70, 247],
+      "delay_ms": 10
+    },
+    {
+      "comment": "SLICER(1) FX_TYPE = 5 (temp patch 0x20001002, range 0-6).",
+      "type": "sysex",
+      "bytes": [240, 65, 16, 0, 0, 0, 0, 29, 18, 32, 0, 16, 2, 5, 73, 247],
+      "delay_ms": 10
+    },
+    {
+      "comment": "SYSTEM TEMPO = 120.0 BPM (0x10000000, INTEGER4x4 = BPM*10 = 1200 = 0x04B0 nibble-split to 00 04 0B 00). The 19-byte frame is why we raise the BLE MTU.",
+      "type": "sysex",
+      "bytes": [240, 65, 16, 0, 0, 0, 0, 29, 18, 16, 0, 0, 0, 0, 4, 11, 0, 97, 247],
+      "delay_ms": 10
+    },
+    {
+      "comment": "EFFECTS ON (CC#80 = 127). Channel-voice: set channel to the SL-2's receive channel (example uses 1).",
+      "type": "cc",
+      "channel": 1,
+      "controller": 80,
+      "value": 127
+    }
+  ]
+}
