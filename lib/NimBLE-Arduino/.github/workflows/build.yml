@@ -58,7 +58,7 @@ jobs:
     steps:
       - uses: actions/checkout@v6
       - name: Build arduino-esp32
-        uses: arduino/compile-sketches@v1.1.0
+        uses: arduino/compile-sketches@v1.1.2
         with:
           cli-version: latest
           platforms: |
@@ -84,7 +84,7 @@ jobs:
     steps:
       - uses: actions/checkout@v6
       - name: Build n-able Arduino
-        uses: arduino/compile-sketches@v1.1.0
+        uses: arduino/compile-sketches@v1.1.2
         with:
           cli-version: latest
           platforms: |
@@ -141,6 +141,6 @@ jobs:
     steps:
       - uses: actions/checkout@v6
       - name: Doxygen Action
-        uses: mattnotmitt/doxygen-action@v1.9.5
+        uses: mattnotmitt/doxygen-action@v1.12
         with:
           working-directory: 'docs/'
