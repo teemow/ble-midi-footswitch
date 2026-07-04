@@ -58,7 +58,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - name: Build arduino-esp32
-        uses: arduino/compile-sketches@v1.1.2
+        uses: arduino/compile-sketches@v1.1.3
         with:
           cli-version: latest
           platforms: |
@@ -84,7 +84,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - name: Build n-able Arduino
-        uses: arduino/compile-sketches@v1.1.2
+        uses: arduino/compile-sketches@v1.1.3
         with:
           cli-version: latest
           platforms: |
